@@ -63,6 +63,30 @@
   .shake { animation: shake .35s linear; }
   @keyframes shake { 0%,100% { transform: none; } 20% { transform: translate(-4px, 2px); } 40% { transform: translate(4px, -2px); } 60% { transform: translate(-3px, -1px); } 80% { transform: translate(3px, 2px); } }
   .hint { text-align: center; margin-top: 22px; font-size: 16px; opacity: .65; width: 0; min-width: 100%; }
+
+  /* 터치 대응 */
+  html, body { -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; overscroll-behavior: none; }
+  #grid, .cell, #face, #diff, #flagmode { touch-action: manipulation; }
+  .win-head .tools { display: flex; align-items: center; gap: 14px; }
+  #flagmode { font: inherit; font-size: 20px; color: var(--ink); background: #fff; cursor: pointer;
+    border: 2.5px solid var(--ink); border-radius: 8px 4px 9px 5px; padding: 0 10px; line-height: 30px; }
+  #flagmode.on { background: var(--ink); color: #fff; }
+  #flagmode:active { transform: translate(1px, 1px); }
+  /* 꾹 누르기 진행 표시: 칸 위에 원이 차오른다 */
+  .cell.holding:after { content: ""; position: absolute; left: 50%; top: 50%; width: 10px; height: 10px; margin: -5px 0 0 -5px;
+    border: 3px solid var(--ink); border-radius: 50%; z-index: 7; pointer-events: none; animation: hold .4s linear forwards; }
+  @keyframes hold { from { transform: scale(.3); opacity: .9; } to { transform: scale(3.4); opacity: .15; } }
+  .cell.holding .tile.cover { background: transparent; border: 1.6px dashed #a9a597; }
+  @media (max-width: 520px) {
+    body { padding: 12px 8px 28px; }
+    .win { padding: 10px 12px 16px; }
+    .win-head { font-size: 19px; margin-bottom: 10px; }
+    #diff { font-size: 19px; } #flagmode { font-size: 17px; line-height: 26px; }
+    .score { padding: 6px 12px 4px; gap: 6px; margin-bottom: 14px; }
+    .stat small { font-size: 14px; } .stat .num { font-size: 34px; line-height: 34px; letter-spacing: 2px; }
+    #face { width: 60px; height: 60px; }
+    .hint { font-size: 14px; }
+  }
 </style>
 </head>
 <body>
@@ -76,7 +100,7 @@
 
 <div class="stage" id="stage">
   <div class="win rough0">
-    <div class="win-head"><span>게임</span><button id="diff"></button></div>
+    <div class="win-head"><span>게임</span><div class="tools"><button id="flagmode" aria-pressed="false">깃발 모드</button><button id="diff"></button></div></div>
     <div class="score rough1">
       <div class="stat"><small>남은 두더지</small><div class="num" id="remain"></div></div>
       <button id="face"></button>
@@ -84,7 +108,7 @@
     </div>
     <div id="grid"></div>
   </div>
-  <p class="hint">좌클릭: 파기 · 우클릭: 깃발/? · 숫자 칸 양쪽 클릭: 주변 한 번에 열기 · 위 난이도 글자를 누르면 바뀝니다</p>
+  <p class="hint" id="hint"></p>
 </div>
 
 <script>
@@ -183,6 +207,11 @@ let state = getInitState('Beginner');
 let seconds = 0, timer = null, lastStatus = null, renderedStatus = null;
 let mouseDownContent = false;
 let openBehavior = { index: -1, behavior: '' };
+let flagMode = false;            // 깃발 모드: 탭이 깃발 설치로 바뀜
+let lastTouch = 0;               // 터치 직후 따라오는 가짜 마우스 이벤트 무시용
+let touch = null;                // 진행 중인 터치 { id, idx, x, y, timer, long, el }
+let touchHint = false;
+const LONG_PRESS_MS = 400, MOVE_CANCEL_PX = 10;
 
 const dispatch = a => { state = reducer(state, a); };
 const remains = () => state.ceils.filter(c => c.state !== 'open').filter(c => c.minesAround >= 0).length;
@@ -301,6 +330,9 @@ function render() {
 
   document.getElementById('diff').textContent = LABEL[state.difficulty];
   document.getElementById('face').innerHTML = faceArt();
+  const fm = document.getElementById('flagmode');
+  fm.classList.toggle('on', flagMode); fm.setAttribute('aria-pressed', String(flagMode));
+  fitCells();
 
   const grid = document.getElementById('grid');
   grid.style.gridTemplateColumns = `repeat(${state.columns}, var(--c))`;
@@ -326,6 +358,7 @@ function render() {
 
   if (justDied) {
     pop();
+    if (navigator.vibrate) navigator.vibrate([40, 30, 70]);   // 안드로이드 진동 (iOS 미지원)
     const stage = document.getElementById('stage');
     stage.classList.remove('shake'); void stage.offsetWidth; stage.classList.add('shake');
   }
@@ -346,7 +379,10 @@ function bind() {
   };
   document.getElementById('face').onclick = () => { dispatch({ type: 'CLEAR_MAP' }); commit(); };
   grid.oncontextmenu = e => e.preventDefault();
+  document.getElementById('flagmode').onclick = () => { flagMode = !flagMode; render(); };
+  grid.onpointerdown = onTouchDown;
   grid.onmousedown = e => {
+    if (Date.now() - lastTouch < 700) return;          // 터치 뒤따라온 가짜 마우스 이벤트
     const index = cellIndex(e);
     if (e.button === 0 && !['won', 'died'].includes(state.status)) mouseDownContent = true;
     if (e.button === 2 && e.buttons === 2 && index !== -1) { changeCeilState(index); commit(); }
@@ -354,12 +390,14 @@ function bind() {
     else if (e.buttons === 3) { openBehavior = { index, behavior: 'multi' }; applyBehavior(); commit(); }
   };
   grid.onmouseover = e => {
+    if (Date.now() - lastTouch < 700) return;
     const index = cellIndex(e);
     if (index === openBehavior.index) return;
     openBehavior = { index, behavior: openBehavior.behavior };
     if (openBehavior.behavior) { applyBehavior(); commit(); }
   };
   grid.onmouseup = () => {
+    if (Date.now() - lastTouch < 700) return;
     const { behavior, index } = openBehavior;
     if (index === -1) return;
     if (behavior === 'single') { openCeil(index); commit(); } else if (behavior === 'multi') { openCeils(index); commit(); }
@@ -370,6 +408,71 @@ window.addEventListener('mouseup', () => {
   openBehavior = { index: -1, behavior: '' }; mouseDownContent = false;
   if (had) { applyBehavior(); commit(); }
 });
+
+/* ===== 터치: 탭 = 열기, 꾹 누르기 = 깃발, 숫자 칸 탭 = 코드 열기 ===== */
+// 누르는 동안 grid 를 다시 그리지 않는다(다시 그리면 손가락이 잡은 요소가 사라져 이벤트가 끊김).
+function onTouchDown(e) {
+  if (e.pointerType === 'mouse') return;              // 마우스는 기존 mouse* 핸들러가 처리
+  if (!touchHint) { touchHint = true; setHint(true); }
+  lastTouch = Date.now();
+  e.preventDefault();                                  // 뒤따르는 가짜 mouse 이벤트 억제
+  cancelTouch();
+  const idx = cellIndex(e);
+  if (idx === -1) return;
+  const el = document.getElementById('grid').children[idx];
+  touch = { id: e.pointerId, idx, x: e.clientX, y: e.clientY, long: false, el, timer: null };
+  const c = state.ceils[idx];
+  if (!['won', 'died'].includes(state.status) && c.state !== 'open') {
+    el.classList.add('holding');
+    touch.timer = setTimeout(() => {
+      if (!touch) return;
+      touch.long = true;
+      el.classList.remove('holding');
+      if (navigator.vibrate) navigator.vibrate(30);
+      changeCeilState(idx); commit();
+    }, LONG_PRESS_MS);
+  }
+}
+function cancelTouch() {
+  if (!touch) return;
+  clearTimeout(touch.timer);
+  touch.el && touch.el.classList.remove('holding');
+  touch = null;
+}
+window.addEventListener('pointermove', e => {
+  if (!touch || e.pointerId !== touch.id) return;
+  if (Math.hypot(e.clientX - touch.x, e.clientY - touch.y) > MOVE_CANCEL_PX) cancelTouch();   // 스크롤 의도
+});
+window.addEventListener('pointerup', e => {
+  if (!touch || e.pointerId !== touch.id) return;
+  lastTouch = Date.now();
+  const { idx, long } = touch;
+  cancelTouch();
+  if (long) return;                                    // 꾹 누르기로 이미 처리됨
+  const c = state.ceils[idx];
+  if (c.state === 'open') { openCeils(idx); commit(); }      // 열린 숫자 칸 탭 = 코드 열기
+  else if (flagMode) { changeCeilState(idx); commit(); }     // 깃발 모드의 탭 = 깃발
+  else { openCeil(idx); commit(); }                          // 일반 탭 = 열기
+});
+window.addEventListener('pointercancel', cancelTouch);
+
+/* ===== 화면 폭에 맞춰 칸 크기 조절 + 힌트 문구 ===== */
+function fitCells() {
+  const room = document.documentElement.clientWidth - (window.innerWidth <= 520 ? 70 : 110);
+  const c = Math.max(18, Math.min(42, Math.floor(room / state.columns)));
+  document.documentElement.style.setProperty('--c', c + 'px');
+}
+window.addEventListener('resize', fitCells);
+function setHint(touchUi) {
+  document.getElementById('hint').textContent = touchUi
+    ? '탭: 파기 · 꾹 누르기: 깃발/? · 숫자 칸 탭: 주변 한 번에 열기 · 깃발 모드: 탭으로 깃발 · 고급은 가로 모드 권장'
+    : '좌클릭: 파기 · 우클릭: 깃발/? · 숫자 칸 양쪽 클릭: 주변 한 번에 열기 · 위 난이도 글자를 누르면 바뀝니다';
+}
+setHint(matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window || navigator.maxTouchPoints > 0);
+// iOS 등: 첫 터치 안에서 오디오를 깨워 둬야 "뽕!" 소리가 난다
+window.addEventListener('pointerdown', () => {
+  try { actx = actx || new (window.AudioContext || window.webkitAudioContext)(); if (actx.state === 'suspended') actx.resume(); } catch (e) {}
+}, { once: true });
 
 commit();
 </script>
