@@ -77,6 +77,35 @@
     border: 3px solid var(--ink); border-radius: 50%; z-index: 7; pointer-events: none; animation: hold .4s linear forwards; }
   @keyframes hold { from { transform: scale(.3); opacity: .9; } to { transform: scale(3.4); opacity: .15; } }
   .cell.holding .tile.cover { background: transparent; border: 1.6px dashed #a9a597; }
+  /* 결과 카드 */
+  .result { position: absolute; left: 50%; top: 130px; width: min(310px, 88vw); z-index: 30; transform: translateX(-50%) rotate(-1.5deg);
+    background: var(--paper); border: 3px solid var(--ink); border-radius: 8px 14px 9px 16px; padding: 14px 16px 16px; text-align: center;
+    box-shadow: 7px 8px 0 var(--ink); animation: drop .5s cubic-bezier(.2, 1.5, .4, 1) both; }
+  @keyframes drop { 0% { transform: translateX(-50%) translateY(-60px) rotate(-8deg) scale(.7); opacity: 0; } 100% { transform: translateX(-50%) rotate(-1.5deg); opacity: 1; } }
+  .result h2 { font-size: 34px; line-height: 1.1; margin: 4px 0 8px; }
+  .result.lose h2 { font-size: 30px; }
+  .r-msg { font-size: 17px; margin-bottom: 8px; opacity: .8; }
+  .r-troop { display: flex; justify-content: center; gap: 6px; height: 54px; }
+  .r-troop span { width: 54px; height: 54px; display: block; }
+  .r-troop svg { width: 100%; height: 100%; overflow: visible; }
+  .r-stats { display: flex; justify-content: center; gap: 14px; margin: 6px 0 12px; }
+  .r-stats > div { border: 2.5px solid var(--ink); border-radius: 6px 9px 6px 10px; padding: 4px 12px; min-width: 84px; background: #fff; }
+  .r-stats small { display: block; font-size: 14px; opacity: .75; }
+  .r-stats b { font-size: 26px; }
+  .r-btns { display: flex; gap: 10px; justify-content: center; }
+  .r-btns button { font: inherit; font-size: 19px; padding: 3px 14px; background: #fff; color: var(--ink); cursor: pointer;
+    border: 2.5px solid var(--ink); border-radius: 8px 4px 9px 5px; }
+  .r-btns button[data-act="again"] { background: var(--ink); color: #fff; }
+  .r-btns button:active { transform: translate(1px, 1px); }
+  .stamp { position: absolute; right: -10px; top: 44px; font-size: 30px; font-weight: bold; color: var(--ink); background: var(--paper);
+    border: 3.5px solid var(--ink); border-radius: 8px; padding: 0 10px; transform: rotate(12deg);
+    animation: stamp .35s cubic-bezier(.2, 1.8, .4, 1) .7s both; }
+  @keyframes stamp { 0% { transform: rotate(12deg) scale(3.2); opacity: 0; } 100% { transform: rotate(12deg) scale(1); opacity: 1; } }
+  .confetti { position: absolute; left: 0; right: 0; top: -6px; height: 0; pointer-events: none; }
+  .confetti i { position: absolute; top: 0; font-style: normal; font-size: 20px; opacity: 0; animation: fall 1.5s ease-in both; }
+  @keyframes fall { 0% { transform: translateY(0) rotate(0); opacity: 1; } 100% { transform: translateY(260px) rotate(300deg); opacity: 0; } }
+  @media (max-width: 520px) { .result { top: 110px; } .result h2 { font-size: 28px; } }
+
   @media (max-width: 520px) {
     body { padding: 12px 8px 28px; }
     .win { padding: 10px 12px 16px; }
@@ -326,6 +355,7 @@ function pop() {
 function render() {
   const animate = state.status === 'died';
   const justDied = animate && renderedStatus !== 'died';
+  const justWon = state.status === 'won' && renderedStatus !== 'won';
   renderedStatus = state.status;
 
   document.getElementById('diff').textContent = LABEL[state.difficulty];
@@ -358,10 +388,14 @@ function render() {
 
   if (justDied) {
     pop();
-    if (navigator.vibrate) navigator.vibrate([40, 30, 70]);   // 안드로이드 진동 (iOS 미지원)
+    vib([40, 30, 70]);   // 안드로이드 진동 (iOS 미지원)
     const stage = document.getElementById('stage');
     stage.classList.remove('shake'); void stage.offsetWidth; stage.classList.add('shake');
   }
+  // 결과 카드: 끝난 순간 한 번만 띄우고, 새 판이 시작되면 치운다
+  if (justWon) showResult('win');
+  else if (justDied) showResult('lose');
+  else if (state.status === 'new' || state.status === 'started') hideResult();
   renderScore();
   bind();
 }
@@ -428,7 +462,7 @@ function onTouchDown(e) {
       if (!touch) return;
       touch.long = true;
       el.classList.remove('holding');
-      if (navigator.vibrate) navigator.vibrate(30);
+      vib(30);
       changeCeilState(idx); commit();
     }, LONG_PRESS_MS);
   }
@@ -455,6 +489,82 @@ window.addEventListener('pointerup', e => {
   else { openCeil(idx); commit(); }                          // 일반 탭 = 열기
 });
 window.addEventListener('pointercancel', cancelTouch);
+
+/* ===== 결과 카드 + 난이도별 최고 기록 ===== */
+const BEST_KEY = 'mole.best.v1';
+let memBest = {};   // localStorage 를 못 쓰는 환경(시크릿 모드, data: URL 등)에서는 이 탭이 열려 있는 동안만 유지
+function loadBest() {
+  try { const v = JSON.parse(localStorage.getItem(BEST_KEY)); if (v && typeof v === 'object') return { ...memBest, ...v }; } catch (e) { /* 폴백 */ }
+  return { ...memBest };
+}
+function saveBest(b) {
+  memBest = { ...b };
+  try { localStorage.setItem(BEST_KEY, JSON.stringify(b)); } catch (e) { /* 저장 불가 환경은 무시 */ }
+}
+function vib(pattern) {      // 사용자 조작 전에는 브라우저가 진동을 막고 콘솔에 오류를 남기므로 확인 후 호출
+  try {
+    if (navigator.vibrate && (!navigator.userActivation || navigator.userActivation.hasBeenActive)) navigator.vibrate(pattern);
+  } catch (e) { /* 미지원 */ }
+}
+const secText = s => (s == null ? '-' : s + '초');
+let resultTimer = null;
+
+function hideResult() {
+  clearTimeout(resultTimer); resultTimer = null;
+  const r = document.getElementById('result');
+  if (r) r.remove();
+}
+function cheer() {                          // 승리 징글: 올라가는 4음
+  try {
+    actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+    [523, 659, 784, 1047].forEach((f, i) => {
+      const o = actx.createOscillator(), g = actx.createGain(), t = actx.currentTime + i * 0.09;
+      o.type = 'triangle'; o.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.35, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+      o.connect(g).connect(actx.destination); o.start(t); o.stop(t + 0.2);
+    });
+  } catch (e) { /* 소리 실패는 무시 */ }
+}
+function showResult(kind) {
+  hideResult();
+  const diff = state.difficulty, took = seconds;
+  const best = loadBest(), prev = best[diff];
+  let isNew = false;
+  if (kind === 'win') {
+    isNew = prev == null || took < prev;
+    if (isNew) { best[diff] = took; saveBest(best); }
+    cheer();
+    vib([30, 40, 30, 40, 90]);
+  }
+  const bestNow = best[diff];
+  const left = state.ceils.filter(c => c.state === 'mine' || c.state === 'die').length;
+  const hit = state.ceils.filter(c => c.state === 'flag' && c.minesAround < 0).length;
+  const troop = [0, 1, 2].map(i => `<span style="--d:${(0.15 + i * 0.12).toFixed(2)}s">${moleArt(false)}</span>`).join('');
+  const bits = Array.from({ length: 16 }, (_, i) =>
+    `<i style="left:${(i * 6.4 + (i % 3) * 2).toFixed(1)}%;animation-delay:${((i * 0.07) % 0.8).toFixed(2)}s">${['✦', '★', '○', '✕', '~'][i % 5]}</i>`).join('');
+  const win = kind === 'win';
+  const html = `
+    <div class="result ${win ? 'win' : 'lose'} rough1" id="result" role="dialog" aria-live="polite">
+      ${win ? `<div class="confetti">${bits}</div>` : ''}
+      <div class="r-troop anim">${troop}</div>
+      <h2>${win ? '다 찾았다!' : '앗, 들켰다!'}</h2>
+      ${win ? '' : `<p class="r-msg">아깝다! 두더지 ${left}마리가 남았어요</p>`}
+      <div class="r-stats">
+        <div><small>${win ? '시간' : '버틴 시간'}</small><b>${secText(took)}</b></div>
+        <div><small>${win ? '최고 기록' : '맞힌 깃발'}</small><b>${win ? secText(bestNow) : hit + ' / ' + state.mines}</b></div>
+        ${win ? '' : `<div><small>최고 기록</small><b>${secText(bestNow)}</b></div>`}
+      </div>
+      ${win && isNew ? '<div class="stamp">NEW!</div>' : ''}
+      <div class="r-btns"><button data-act="again">한 판 더</button><button data-act="close">닫기</button></div>
+    </div>`;
+  // 두더지가 튀어나오는 연출이 먼저 보이도록 살짝 늦게 띄운다
+  resultTimer = setTimeout(() => {
+    document.getElementById('stage').insertAdjacentHTML('beforeend', html);
+    const el = document.getElementById('result');
+    el.querySelector('[data-act="again"]').onclick = () => { dispatch({ type: 'CLEAR_MAP' }); hideResult(); commit(); };
+    el.querySelector('[data-act="close"]').onclick = hideResult;
+  }, win ? 450 : 900);
+}
 
 /* ===== 화면 폭에 맞춰 칸 크기 조절 + 힌트 문구 ===== */
 function fitCells() {
